@@ -1,4 +1,4 @@
-<script src="nextTick.js"></script>
+<script src="../demo_v1/nextTick.js"></script>
 
 <script>
 
@@ -37,7 +37,7 @@
 
   async function bobob(res){
     const bo = await res;
-    console.log("true", bo === nextTick.cancelledTask);
+    console.log("true", bo === nextTick.CANCELLED);
   }
 
   (async function () {

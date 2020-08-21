@@ -1,114 +1,118 @@
 (function () {
-
-  function parseNextTickArg(cbs) {
-    if (cbs instanceof Array && cbs.length && cbs.every(fun => fun instanceof Function))
-      return cbs;    //avoids external mutations
-    throw new Error("only a Function, an array of functions can be passed to nextMesoTicks");
-  }
-
-  function runMesoLevelTask(e) {
-    this._mesoLevelTasks ? this._mesoLevelTasks.shift()() : e.stopImmediatePropagation();
-  }
-
-  function addMesoLevelTasks(tasks, level) {
-    var resolve;
-    var promise = new Promise(function (resolveImpl) {//no mesotask error causes the rest of the mesotasks to falter, thus no reject should be possible.
-      resolve = resolveImpl;
-    });
-    tasks = parseNextTickArg(tasks);
-    level._mesoLevelTasks = tasks.concat(resolve.bind(null, true));
-    for (let i = 0; i < level._mesoLevelTasks.length; i++)
-      level.addEventListener("ratechange", runMesoLevelTask.bind(level), true);
-    return promise;
-  }
-
-//levels: starts as [ audio, span ]
-//        grows when needed into [ audio, span , span , ... , span ]
+  //levels: starts as [ audio, span ], then grows when needed into [ audio, span , span , ... , span ]
   var levels = [document.createElement("audio"), document.createElement("span")];
   levels[1].appendChild(levels[0]);
 
   function getClone(depth) {
     while (depth > levels.length) {
-      var span = document.createElement("span");//todo assumes that span is the simplest element for the browser to initiate.
+      var span = document.createElement("span");
       span.appendChild(levels[levels.length - 1]);
       levels.push(span);
     }
-    return levels[depth-1].cloneNode(true);
+    return levels[depth - 1].cloneNode(true);
   }
 
-  function getTopAudio(depth) {
-    var top = getClone(depth);
-    var audio = top;
-    while (audio.children.length)
-      audio = audio.children[0];
-    return [top, audio];
+  function dispatchErrorEvent(error, message) {
+    var uncaught = new ErrorEvent('error', {error: error, message: message});
+    window.dispatchEvent(uncaught);
+    !uncaught.defaultPrevented && console.error(uncaught);
   }
 
-  function ratechangeTickStart(mesoLevels) {
-    var topAudio = getTopAudio(mesoLevels);
-    topAudio[1].playbackRate = 2;
-    return topAudio[0];
+  function runMesoLevelTask(e) {
+    if (!this._mesoLevelTasks)
+      return e.stopImmediatePropagation();
+    try {
+      var task = this._mesoLevelTasks.shift();
+      if (this._mesoLevelTasks.length === 0)
+        task("completed");
+      task();
+    } catch (error) {
+      dispatchErrorEvent(error, "Uncaught Error: a function called async via 'macrotask.ticks(tasks)' broke down.");
+    }
   }
 
-//todo nextTick(cb)
-//todo nextMesoTicks([cbs], levels)
+  function addMesoTasks(tasks, span) {
+    var resolve;
+    //no mesotask error causes the rest of the mesotasks to falter, thus no reject should be possible.
+    var promise = new Promise(function (resolveImpl) {
+      return resolve = resolveImpl;
+    });
+    span._mesoLevelTasks = tasks.concat(resolve);//makes the _mesoLevelTasks immutable.
+    for (var i = 0; i < span._mesoLevelTasks.length; i++)
+      span.addEventListener("ratechange", runMesoLevelTask.bind(span), true);
+    return promise;
+  }
 
-//mesotask promises return true when completed, and false when cancelled.
-//mesotask promises never fail.
-  function nextMesoTicks(tasks, mesoLevels) {
-    mesoLevels = Math.max(parseInt(mesoLevels), 0);
-    var level = ratechangeTickStart(mesoLevels);
-    var macrotaskPromise = addMesoLevelTasks(tasks, level);
+//macrotask promises return true when completed, and "cancelled" when cancelled, they never fail.
+  function macrotask(depth) {
+    if (depth <= 0 || !(depth === (depth ^ 0)))
+      throw new TypeError("'depth' in 'macrotask(depth)' must be a positive integer");
+    var span = getClone(depth + 1);
+    var audio = span.querySelector("audio");
+    var finalPromise = addMesoTasks([], audio);
+    audio.playbackRate = 2;
 
-    macrotaskPromise.nextMesoTick = function (extraTasks) {
-      level = level.children[0];   //todo "level" is a closure variable.. its techincally safe, but likely can cause dev errors.
-      if (level)                   //todo should i add "levels" to the macrotaskPromise instead??
-        return addMesoLevelTasks(extraTasks, level);
-      throw new Error("cannot add any more mesotasks to this macrotask");
+    finalPromise.ticks = function (tasks) {
+      if (!audio._mesoLevelTasks.length)
+        throw new Error("This macrotask has already completed. You cannot add more tasks. You must either add the tasks sooner, or make a new macrotask.");
+      if (span instanceof HTMLAudioElement)
+        throw new Error("This macrotask is full. You cannot add more tasks. You must either give the macrotask more depth, or make a new macrotask.");
+      if (!(tasks instanceof Array) || tasks.indexOf(function (fun) {
+        return !(fun instanceof Function);
+      }) >= 0)
+        throw new TypeError("'tasks' in 'macrotask.ticks(tasks)' must be an array of Functions.");
+      if (!tasks.length)
+        return true;
+      var promise = addMesoTasks(tasks, span);
+      span = span.children[0];
+      return promise;
     };
 
     // to flush a macroTask, you call cancel() which returns an array of not yet done methods,
     //                       and then you call these returned functions.
     //returns an array with the functions that were cancelled
-    macrotaskPromise.cancel = function () {
+    finalPromise.cancel = function () {
+      if (!audio._mesoLevelTasks || !audio._mesoLevelTasks.length)
+        throw new Error("This macrotask is already completed or cancelled. Cannot cancel it (again).");
       var undone = [];
       var resolves = [];
-      //start with level, it is the deepest one that has added mesotasks
-      while (level && level._mesoLevelTasks && level._mesoLevelTasks.length) {
-        resolves.push(level._mesoLevelTasks.pop());         //take out the listener that will call the resolve on the element.
-        undone = level._mesoLevelTasks.concat(undone);      //take the rest of the listeners out into undone
-        level._mesoLevelTasks = undefined;                  //set to undefined to communicate the method being removed.
-        level = level.parentNode;
+      //start with span, it is the deepest one that has added mesotasks
+      while (span && span._mesoLevelTasks && span._mesoLevelTasks.length) {
+        resolves.unshift(span._mesoLevelTasks.pop());         //take out the listener that will call the resolve on the element.
+        undone = span._mesoLevelTasks.concat(undone);      //take the rest of the listeners out into undone
+        span._mesoLevelTasks = undefined;                  //set to undefined to communicate the method being removed.
+        span = span.parentNode;
       }
-      for (let i = 0; i < resolves.length; i++)
-        resolves[i]("cancelled");//todo should the resolve return false when cancelled??
+      if (audio._mesoLevelTasks) {
+        resolves.unshift(audio._mesoLevelTasks.pop());
+        span = audio;
+        audio._mesoLevelTasks = undefined;
+      }
+      for (var i = 0; i < resolves.length; i++)
+        resolves[i]("cancelled");
       return undone;
     };
-    return macrotaskPromise;
+
+    return finalPromise;
   }
 
+
+//nextTick
   var reusables = [];
   var tasks = [];
 
   function doTask() {
     var task = tasks.shift();
+    task.isResolved = true;
     reusables.push(task.audio);
     task.resolve(task.cb());
-  }
-
-  function cancelTask(promise) {
-    var taskIndex = tasks.findIndex(t => t.promise === promise);
-    var task = tasks.splice(taskIndex, 1)[0];
-    task.resolve(nextTick.cancelledTask);
-    task.audio.onratechange = undefined; //note!! drops the event!
-    return task.cb;
   }
 
   function nextTick(cb) {
 
     var resolve;
     var promise = new Promise(function (resolveImpl) {
-      resolve = resolveImpl;
+      return resolve = resolveImpl;
     });
 
     var audio;
@@ -119,18 +123,25 @@
       audio.onratechange = doTask;
     }
     audio.playbackRate = audio.playbackRate === 2 ? 1 : 2;
-    tasks.push({cb, resolve, promise, audio});
+    var task = {cb: cb, resolve: resolve, audio: audio};
+    tasks.push(task);
 
-    // Object.defineProperty(promise, "cancel", {value: cancelTask});
-    promise.cancel = cancelTask.bind(null, promise); //is this safer, and is this faster??
+    Object.defineProperty(promise, "cancel", {
+      value: function () {
+        if (task.isResolved)
+          throw new Error("The 'nextTick(cb)' has already completed. Cannot '.cancel()' it.");
+        tasks.splice(tasks.indexOf(task), 1);//remove the task from the list of tasks
+        task.audio.onratechange = undefined; //note!! drops the event dispatch too!
+        task.resolve(nextTick.CANCELLED);    //alert any .then(...) or await ... that the task is CANCELLED
+        return task.cb;
+      }
+    });
+
     return promise;
   }
 
-  nextTick.cancelledTask = {};
-  Object.freeze(nextTick);
-  Object.freeze(nextTick.cancelledTask);
+  Object.defineProperty(nextTick, "CANCELLED", {value: {}}); //nextTick.CANCELLED is an empty object used as key.2
 
-  //alternative, custom export format. use version on the name
-  window.nextTick ? window["2jsNextTick_1.0"] = nextTick : window.nextTick = nextTick;
-  window.nextMesoTicks ? window["2jsNextMesoTicks_1.0"] = nextMesoTicks : window.nextMesoTicks = nextMesoTicks;
+  window.nextTick = nextTick;
+  window.macrotask = macrotask;
 })();

@@ -1,0 +1,169 @@
+<script src="../src/nextTick.js"></script><!--sync es5 version, creates window.nextTick and window.macrotask-->
+<script type="module">                     //async es6 version, creates window.nextTick and window.macrotask
+  import {nextTick, macrotask} from "../src/nextTick_es6.js";
+
+  window.nextTickES6 = nextTick;
+  window.macrotaskES6 = macrotask;
+</script>
+<script>
+
+  const tests = [
+    async function testMacroCancel(macrotask, nextTick) {
+      const cb = function () {
+      };
+      const macro = macrotask(1);
+      const one = macro.ticks([cb]);
+      const cancelledCB = macro.cancel();
+      console.log(cancelledCB[0] === cb);
+      const waiting = await one;
+      const waiting2 = await macro;
+      console.log(waiting === "cancelled");
+      console.log(waiting2 === "cancelled");
+    },
+    async function testMacro(macrotask, nextTick) {
+      let res = "";
+
+      function a() {
+        res += "a";
+      }
+
+      function b() {
+        res += "b";
+      }
+
+      function c() {
+        res += "c";
+      }
+
+      const macro = macrotask(3);
+      const one = macro.ticks([a]);
+      console.log(res === "");
+      console.log(await one === "completed");
+      console.log(res === "a");
+
+      const two = macro.ticks([b, c]);
+      console.log(res === "a");
+      console.log(await two === "completed");
+      console.log(res === "abc");
+      console.log(await macro === "completed");
+    },
+    async function testCancel(macrotask, nextTick) {
+      const cb = function () {
+      };
+      const one = nextTick(cb);
+      const cancelledCB = one.cancel();
+      const waiting = await one;
+      console.log(waiting === nextTick.CANCELLED);
+      console.log(cancelledCB === cb);
+    },
+    async function test3(macrotask, nextTick) {
+      let res = "";
+
+      function a() {
+        res += "a";
+      }
+
+      function b() {
+        res += "b";
+      }
+
+      function c() {
+        res += "c";
+      }
+
+      const one = nextTick(a);
+      const two = nextTick(b);
+      const three = nextTick(c);
+      console.log(res === "");
+      await one;
+      console.log(res === "a");
+      await three;
+      console.log(res === "abc");
+      await two;
+      console.log("test await", res === "abc");
+    },
+    async function testMidwayCancel(macrotask, nextTick) {
+      let res = "";
+
+      function a() {
+        res += "a";
+      }
+
+      function b() {
+        res += "b";
+      }
+
+      function c() {
+        res += "c";
+      }
+
+      const one = nextTick(a);
+      const two = nextTick(b);
+      const three = nextTick(c);
+      // one.cancel();
+      two.cancel();
+      await three;
+      console.log("midway", res === "ac");
+    },
+    async function testReuse(macrotask, nextTick) {
+      let res = "";
+
+      function a() {
+        res += "a";
+      }
+
+      function b() {
+        res += "b";
+      }
+
+      function c() {
+        res += "c";
+      }
+
+      const one = nextTick(a);
+      await one;
+      console.log("reuse 1", res === "a");
+      const two = nextTick(b);
+      await two;
+      console.log("reuse 2", res === "ab");
+      const three = nextTick(c);
+      await three;
+      console.log("reuse 3", res === "abc");
+    },
+    async function macrotask_ticksTooLate() {
+      const ticker = macrotask(200);
+      console.log(await ticker);
+      try{
+        ticker.ticks([() => console.log("two"), () => console.log("two and a half")]);
+      } catch (error){
+        console.log("error correctly");
+      }
+    },
+    async function macrotaskTest() {
+      nextTick(() => console.log("one"));
+      const ticker = macrotask(2);
+      await ticker.ticks([() => console.log("two"), () => console.log("two and a half")]);
+      console.log("three")
+      await ticker.ticks([() => console.log("four")]);
+      console.log("five");
+      await ticker;
+      console.log("six");
+    }
+    //todo test throwing error from inside tasks.
+    //todo test microtasks / prt inside the tasks
+    //todo test error messages
+    //todo split into index.html and test files.
+  ];
+  let i = 0;
+  for (let test of tests) {
+    setTimeout(function () {
+      console.log(test.name + ": es5");
+      test(macrotask, nextTick);
+    }, i * 100);
+    setTimeout(function () {
+      console.log(test.name + ": es6");
+      test(macrotask, nextTick);
+    }, (i * 100) + 50);
+    i++;
+  }
+</script>
